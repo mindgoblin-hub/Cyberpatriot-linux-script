@@ -1,0 +1,692 @@
+#!/usr/bin/env bash
+#
+# CyberPatriot Linux Base Configuration
+# File: base/base-config.sh
+#
+# Purpose:
+#   - Identify the Linux distribution
+#   - Log script activity
+#   - Audit user accounts and administrative access
+#   - Audit sensitive file permissions
+#   - Check firewall status
+#   - Offer selected security changes with confirmation
+#
+# Safety:
+#   - Never automatically delete user accounts
+#   - Never automatically change user passwords
+#   - Never automatically disable services
+#   - Ask before every configuration change
+#
+# Usage:
+#   sudo bash base/base-config.sh
+#
+# Logs are stored in /var/log/cyberpatriot/ when writable.
+set -uo pipefail
+umask 077
+
+SCRIPT_NAME="CyberPatriot Base Configuration"
+LOG_DIR="/var/log/cyberpatriot"
+LOG_FILE=""
+CHANGES_MADE=0
+ERRORS=0
+
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
+
+init_logging() {
+    if [[ $EUID -ne 0 ]]; then
+        printf 'ERROR: Run this script as root.\n' >&2
+        printf 'Example: sudo bash base/base-config.sh\n' >&2
+        exit 1
+    fi
+
+    if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
+        printf 'ERROR: Cannot create log directory: %s\n' "$LOG_DIR" >&2
+        exit 1
+    fi
+
+    if ! chmod 700 "$LOG_DIR"; then
+        printf 'ERROR: Cannot secure log directory.\n' >&2
+        exit 1
+    fi
+
+    LOG_FILE="$LOG_DIR/base-$(date +%Y%m%d-%H%M%S).log"
+
+    if ! touch "$LOG_FILE" || ! chmod 600 "$LOG_FILE"; then
+        printf 'ERROR: Cannot create a secure log file.\n' >&2
+        exit 1
+    fi
+}
+
+log() {
+    local level="$1"
+    shift
+    local message="$*"
+
+    printf '[%s] [%s] %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" \
+        "$level" "$message" | tee -a "$LOG_FILE"
+}
+
+info() {
+    log INFO "$@"
+}
+
+warn() {
+    log WARNING "$@"
+}
+
+error() {
+    log ERROR "$@"
+    ERRORS=$((ERRORS + 1))
+}
+
+section() {
+    printf '\n'
+    printf '%s\n' "=================================================="
+    printf '%s\n' "$*"
+    printf '%s\n' "=================================================="
+    info "SECTION: $*"
+}
+
+# --------------------------------------------------
+# User confirmation
+# --------------------------------------------------
+
+confirm() {
+    local answer
+
+    printf '\n%s [y/N]: ' "$1"
+
+    # Do not silently approve changes when input is unavailable.
+    if ! IFS= read -r answer; then
+        warn "No interactive input available. Skipping change."
+        return 1
+    fi
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            return 0
+            ;;
+        *)
+            info "User declined: $1"
+            return 1
+            ;;
+    esac
+}
+
+# --------------------------------------------------
+# Distribution detection
+# --------------------------------------------------
+
+detect_distribution() {
+    section "Linux Distribution"
+
+    if [[ -r /etc/os-release ]]; then
+        # This is the operating system's standard identification file.
+        . /etc/os-release
+        DISTRO_NAME="${PRETTY_NAME:-${NAME:-Unknown Linux}}"
+        DISTRO_ID="${ID:-unknown}"
+        DISTRO_VERSION="${VERSION_ID:-unknown}"
+    else
+        DISTRO_NAME="Unknown Linux"
+        DISTRO_ID="unknown"
+        DISTRO_VERSION="unknown"
+        warn "/etc/os-release is unavailable."
+    fi
+
+    info "Distribution: $DISTRO_NAME"
+    info "Distribution ID: $DISTRO_ID"
+    info "Version: $DISTRO_VERSION"
+
+    printf 'Distribution: %s\n' "$DISTRO_NAME"
+    printf 'Kernel: %s\n' "$(uname -r)"
+}
+
+# --------------------------------------------------
+# Basic system information
+# --------------------------------------------------
+
+system_information() {
+    section "System Information"
+
+    info "Hostname: $(hostname 2>/dev/null || printf unknown)"
+    info "Kernel: $(uname -r)"
+    info "Architecture: $(uname -m)"
+    info "Current date: $(date)"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        info "systemd is available."
+    else
+        info "systemd is not available."
+    fi
+
+    printf 'Hostname: %s\n' "$(hostname 2>/dev/null || printf unknown)"
+    printf 'Architecture: %s\n' "$(uname -m)"
+}
+
+# --------------------------------------------------
+# User account audit
+# --------------------------------------------------
+
+audit_users() {
+    section "User Account Audit"
+
+    info "Accounts listed in /etc/passwd:"
+    if ! awk -F: '{printf "User: %-24s UID: %-7s Home: %s Shell: %s\n", $1, $3, $6, $7}' \
+        /etc/passwd | tee -a "$LOG_FILE"; then
+        error "Could not audit /etc/passwd."
+    fi
+
+    printf '\nAdministrative accounts (UID 0):\n'
+    awk -F: '$3 == 0 {print $1}' /etc/passwd | tee -a "$LOG_FILE"
+
+    printf '\nUsers with login-capable shells (review required):\n'
+    awk -F: '
+        $7 !~ /(nologin|false|sync|shutdown|halt)$/ && $7 != "" {
+            printf "%-24s UID=%-7s Shell=%s\n", $1, $3, $7
+        }
+    ' /etc/passwd | tee -a "$LOG_FILE"
+
+    if getent group sudo >/dev/null 2>&1; then
+        printf '\nMembers of the sudo group:\n'
+        getent group sudo | tee -a "$LOG_FILE"
+    fi
+
+    if getent group wheel >/dev/null 2>&1; then
+        printf '\nMembers of the wheel group:\n'
+        getent group wheel | tee -a "$LOG_FILE"
+    fi
+
+    printf '\nReview account requirements in the CyberPatriot instructions.\n'
+    printf 'Do not remove accounts solely because they are unfamiliar.\n'
+
+    info "User account audit completed."
+}
+
+# --------------------------------------------------
+# Sensitive file permission audit
+# --------------------------------------------------
+
+audit_permissions() {
+    section "Sensitive File Permission Audit"
+
+    local file
+    local mode
+    local owner
+    local group
+
+    for file in /etc/passwd /etc/shadow /etc/group /etc/gshadow; do
+        if [[ ! -e "$file" ]]; then
+            warn "File not found: $file"
+            continue
+        fi
+
+        mode="$(stat -c '%a' "$file" 2>/dev/null)" || {
+            error "Could not read permissions for $file."
+            continue
+        }
+
+        owner="$(stat -c '%U' "$file" 2>/dev/null)" || owner="unknown"
+        group="$(stat -c '%G' "$file" 2>/dev/null)" || group="unknown"
+
+        printf '%-18s mode=%-5s owner=%-10s group=%s\n' \
+            "$file" "$mode" "$owner" "$group" | tee -a "$LOG_FILE"
+
+        case "$file" in
+            /etc/passwd|/etc/group)
+                if [[ "$mode" != "644" || "$owner" != "root" || "$group" != "root" ]]; then
+                    warn "$file differs from the common 644 root:root baseline."
+                fi
+                ;;
+            /etc/shadow|/etc/gshadow)
+                if [[ "$owner" != "root" || "$mode" != "640" && "$mode" != "600" ]]; then
+                    warn "$file needs review against distribution-specific defaults."
+                fi
+                ;;
+        esac
+    done
+
+    printf '\nPermission audit only: no permissions were changed.\n'
+    info "Sensitive file permission audit completed."
+}
+
+# --------------------------------------------------
+# Firewall status audit
+# --------------------------------------------------
+
+audit_firewall() {
+    section "Firewall Status Audit"
+
+    local found=0
+
+    if command -v ufw >/dev/null 2>&1; then
+        found=1
+        printf '\nUFW status:\n'
+        ufw status 2>&1 | tee -a "$LOG_FILE" || warn "Could not read UFW status."
+    fi
+
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        found=1
+        printf '\nFirewalld status:\n'
+        firewall-cmd --state 2>&1 | tee -a "$LOG_FILE" ||
+            warn "Firewalld is not running or its status could not be read."
+    fi
+
+    if command -v nft >/dev/null 2>&1; then
+        found=1
+        printf '\nNftables ruleset summary:\n'
+        nft list ruleset 2>&1 | head -n 80 | tee -a "$LOG_FILE" ||
+            warn "Could not read nftables rules."
+    fi
+
+    if command -v iptables >/dev/null 2>&1; then
+        found=1
+        printf '\niptables filter rules:\n'
+        iptables -S 2>&1 | head -n 80 | tee -a "$LOG_FILE" ||
+            warn "Could not read iptables rules."
+    fi
+
+    if [[ "$found" -eq 0 ]]; then
+        warn "No recognized firewall command was found."
+    fi
+
+    printf '\nFirewall inspection only. No firewall settings were changed.\n'
+    info "Firewall audit completed."
+}
+
+# --------------------------------------------------
+# Optional security change: permissions
+# --------------------------------------------------
+
+offer_passwd_permissions_fix() {
+    section "Optional Permission Correction"
+
+    local file="/etc/passwd"
+    local current_mode
+    local current_owner
+    local current_group
+
+    current_mode="$(stat -c '%a' "$file" 2>/dev/null)" || {
+        error "Cannot inspect $file."
+        return
+    }
+    current_owner="$(stat -c '%U' "$file" 2>/dev/null)" || return
+    current_group="$(stat -c '%G' "$file" 2>/dev/null)" || return
+
+    if [[ "$current_mode" == "644" &&
+          "$current_owner" == "root" &&
+          "$current_group" == "root" ]]; then
+        info "$file already matches the common baseline."
+        return
+    fi
+
+    printf 'Current: %s %s:%s\n' \
+        "$current_mode" "$current_owner" "$current_group"
+    printf 'Proposed: 644 root:root\n'
+
+    warn "Check the competition requirements before changing permissions."
+
+    if confirm "Set /etc/passwd to mode 644 and owner root:root?"; then
+        if chown root:root "$file" && chmod 644 "$file"; then
+            CHANGES_MADE=$((CHANGES_MADE + 1))
+            info "Corrected /etc/passwd permissions."
+        else
+            error "Failed to correct /etc/passwd permissions."
+        fi
+    fi
+}
+
+# --------------------------------------------------
+# Optional security change: UFW
+# --------------------------------------------------
+
+offer_ufw_enable() {
+    section "Optional Firewall Change"
+
+    if ! command -v ufw >/dev/null 2>&1; then
+        info "UFW is not installed. No changes offered."
+        return
+    fi
+
+    if ufw status 2>/dev/null | grep -q 'Status: active'; then
+        info "UFW is already active."
+        return
+    fi
+
+    warn "Enabling a firewall can interrupt network services."
+    warn "Review required ports and competition instructions first."
+
+    if confirm "Enable UFW now?"; then
+        if ufw --force enable; then
+            CHANGES_MADE=$((CHANGES_MADE + 1))
+            info "UFW enable command completed."
+        else
+            error "Failed to enable UFW."
+        fi
+    fi
+}
+# --------------------------------------------------
+# Protected Account List
+# --------------------------------------------------
+
+PROTECTED_USERS_FILE=""
+
+load_protected_users() {
+    local candidates=(
+        "$(dirname -- "${BASH_SOURCE[0]}")/../config/protected-users.txt"
+        "./config/protected-users.txt"
+    )
+
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" && -r "$candidate" ]]; then
+            PROTECTED_USERS_FILE="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$PROTECTED_USERS_FILE" ]]; then
+        warn "Protected-users file not found. Destructive account actions will be blocked."
+        return 1
+    fi
+
+    info "Loaded protected account list: $PROTECTED_USERS_FILE"
+}
+
+is_protected_user() {
+    local username="$1"
+
+    # Always protect root, even if the list is missing.
+    [[ "$username" == "root" ]] && return 0
+
+    # Fail closed if the protection file is unavailable.
+    [[ -n "$PROTECTED_USERS_FILE" && -r "$PROTECTED_USERS_FILE" ]] || return 0
+
+    # Exact username matching; ignore blank lines and comments.
+    awk -v user="$username" '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { next }
+        {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            if ($0 == user) found = 1
+        }
+        END { exit !found }
+    ' "$PROTECTED_USERS_FILE"
+}
+# --------------------------------------------------
+# Interactive User Audit and Remediation
+# --------------------------------------------------
+
+audit_and_manage_users() {
+    section "User Audit and Management"
+
+    printf 'Review the following local accounts:\n\n'
+    awk -F: '{
+        printf "%-22s UID=%-7s HOME=%-24s SHELL=%s\n",
+               $1, $3, $6, $7
+    }' /etc/passwd | tee -a "$LOG_FILE"
+
+    printf '\nAccounts with UID 0:\n'
+    awk -F: '$3 == 0 {print $1}' /etc/passwd | tee -a "$LOG_FILE"
+
+    printf '\nReview these administrative groups if they exist:\n'
+    local group
+    for group in sudo wheel adm; do
+        if getent group "$group" >/dev/null 2>&1; then
+            getent group "$group" | tee -a "$LOG_FILE"
+        fi
+    done
+
+    while confirm "Review another account for possible unauthorized access?"; do
+        local username
+        local uid
+        local shell
+        local action
+
+        read -r -p "Enter the exact username to review: " username || return
+
+        # Only accept a simple local account name.
+        if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*[$]?$ ]]; then
+            warn "Invalid username format. Skipping."
+            continue
+        fi
+
+        if ! awk -F: -v u="$username" '$1 == u {found=1} END {exit !found}' /etc/passwd; then
+            warn "User is not in the local /etc/passwd file: $username"
+            continue
+        fi
+
+        uid="$(id -u "$username" 2>/dev/null)" || {
+            warn "Cannot resolve local user: $username"
+            continue
+        }
+
+        shell="$(getent passwd "$username" | cut -d: -f7)"
+
+        printf '\nAccount: %s\nUID: %s\nShell: %s\n' \
+            "$username" "$uid" "$shell"
+
+        id "$username" | tee -a "$LOG_FILE"
+        if is_protected_user "$username"; then
+            warn "Protected account: $username. No changes allowed."
+            continue
+        fi
+
+        if [[ "$uid" -eq 0 ]]; then
+            warn "Refusing to modify a UID 0 account."
+            continue
+        fi
+
+        if [[ "$uid" -eq 0 || "$username" == "root" ]]; then
+            warn "Refusing to disable or delete a UID 0 account."
+            continue
+        fi
+
+        printf '\nChoose an action for %s:\n' "$username"
+        printf '1) Lock the password\n'
+        printf '2) Remove from an administrative group\n'
+        printf '3) Delete the account (preserve home/files)\n'
+        printf '4) No changes\n'
+
+        read -r -p "Selection [4]: " action || return
+
+        case "$action" in
+            1)
+                if confirm "Lock the password for $username?"; then
+                    if passwd -l "$username"; then
+                        CHANGES_MADE=$((CHANGES_MADE + 1))
+                        info "Locked password for $username."
+                        warn "Password locking alone may not block SSH-key access."
+                    else
+                        error "Could not lock password for $username."
+                    fi
+                fi
+                ;;
+            2)
+                local admin_group
+                local group_found=0
+
+                printf 'Available administrative groups:\n'
+                for group in sudo wheel; do
+                    if getent group "$group" >/dev/null 2>&1; then
+                        printf '%s: ' "$group"
+                        getent group "$group" | cut -d: -f4
+                    fi
+                done
+
+                read -r -p "Exact group to remove user from: " admin_group || return
+
+                if [[ "$admin_group" != "sudo" && "$admin_group" != "wheel" ]]; then
+                    warn "Only sudo and wheel are supported by this action."
+                    continue
+                fi
+
+                if ! getent group "$admin_group" >/dev/null 2>&1; then
+                    warn "Group does not exist: $admin_group"
+                    continue
+                fi
+
+                if ! id -nG "$username" | tr ' ' '\n' |
+                    grep -Fxq "$admin_group"; then
+                    warn "$username is not a member of $admin_group."
+                    continue
+                fi
+
+                if ! command -v gpasswd >/dev/null 2>&1; then
+                    error "gpasswd is unavailable; no group change made."
+                    continue
+                fi
+
+                if confirm "Remove $username from $admin_group?"; then
+                    if gpasswd -d "$username" "$admin_group"; then
+                        CHANGES_MADE=$((CHANGES_MADE + 1))
+                        info "Removed $username from $admin_group."
+                    else
+                        error "Failed to change $admin_group membership."
+                    fi
+                fi
+                ;;
+            3)
+                warn "This deletes the account, but intentionally preserves its home directory."
+                warn "Check required users, services, scheduled jobs, and competition instructions."
+
+                if confirm "Permanently delete account $username?"; then
+                    if command -v userdel >/dev/null 2>&1 &&
+                       userdel "$username"; then
+                        CHANGES_MADE=$((CHANGES_MADE + 1))
+                        info "Deleted account $username; home files were not explicitly removed."
+                    else
+                        error "Could not delete $username."
+                    fi
+                fi
+                ;;
+            4|"")
+                info "No changes selected for $username."
+                ;;
+            *)
+                warn "Invalid selection."
+                ;;
+        esac
+    done
+}
+
+# --------------------------------------------------
+# Password Aging Configuration
+# --------------------------------------------------
+
+configure_password_aging() {
+    section "Password Aging Configuration"
+
+    if ! command -v chage >/dev/null 2>&1; then
+        warn "chage is unavailable. Password aging configuration skipped."
+        return
+    fi
+
+    printf 'This section configures password aging for a selected account.\n'
+    printf 'It does not set a new password or configure PAM complexity.\n'
+
+    while confirm "Configure password aging for a user?"; do
+        local username
+
+        read -r -p "Enter the exact username: " username || return
+
+        if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*[$]?$ ]]; then
+            warn "Invalid username format. Skipping."
+            continue
+        fi
+
+        if ! awk -F: -v u="$username" '$1 == u {found=1} END {exit !found}' /etc/passwd; then
+            warn "User not found in /etc/passwd: $username"
+            continue
+        fi
+
+        local uid
+        uid="$(id -u "$username" 2>/dev/null)" || continue
+
+        if [[ "$uid" -lt 1000 || "$username" == "root" ]]; then
+            warn "This appears to be a system or root account. Skipping."
+            continue
+        fi
+
+        printf '\nCurrent password aging settings for %s:\n' "$username"
+        chage -l "$username" | tee -a "$LOG_FILE"
+
+        printf '\nProposed settings:\n'
+        printf 'Minimum password age: 1 day\n'
+        printf 'Maximum password age: 90 days\n'
+        printf 'Expiration warning: 7 days\n'
+
+        if confirm "Apply these password aging settings to $username?"; then
+            if chage -m 1 -M 90 -W 7 "$username"; then
+                CHANGES_MADE=$((CHANGES_MADE + 1))
+                info "Updated password aging for $username."
+                chage -l "$username" | tee -a "$LOG_FILE"
+            else
+                error "Could not update password aging for $username."
+            fi
+        fi
+    done
+}
+2. Connect the new functions to the main script
+Find the main() function near the bottom of your file. Find these existing lines:
+
+bash
+audit_users
+audit_permissions
+audit_firewall
+Replace them with:
+
+bash
+audit_users
+audit_and_manage_users
+configure_password_aging
+audit_permissions
+audit_firewall
+# --------------------------------------------------
+# Main menu
+# --------------------------------------------------
+
+main() {
+    init_logging
+    load_protected_users || true
+
+    section "$SCRIPT_NAME"
+
+    info "Script started."
+    info "Log file: $LOG_FILE"
+
+    detect_distribution
+    system_information
+    audit_users
+    audit_and_manage_users
+    configure_password_aging
+    audit_permissions
+    audit_firewall
+
+    section "Optional Security Changes"
+
+    printf 'The following actions can change system configuration.\n'
+    printf 'Review competition requirements before approving them.\n'
+
+    if confirm "Review and optionally correct /etc/passwd permissions?"; then
+        offer_passwd_permissions_fix
+    fi
+
+    if confirm "Review and optionally enable UFW?"; then
+        offer_ufw_enable
+    fi
+
+    section "Final Summary"
+
+    info "Changes made: $CHANGES_MADE"
+    info "Errors encountered: $ERRORS"
+    info "Script completed."
+
+    printf 'Changes made: %s\n' "$CHANGES_MADE"
+    printf 'Errors encountered: %s\n' "$ERRORS"
+    printf 'Log saved to: %s\n' "$LOG_FILE"
+}
+
+main "$@"
