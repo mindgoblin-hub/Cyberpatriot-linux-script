@@ -2,36 +2,41 @@
 #!/bin/bash
 
 # ==========================================
-# CYBERPATRIOT UFW FIREWALL CONFIGURATION
-# Debian / Ubuntu / APT distributions
+# CYBERPATRIOT UNIVERSAL FIREWALL MANAGER
+# Debian / Ubuntu / Mint / Pop!_OS
+# Fedora / RHEL / Rocky / AlmaLinux
+# Arch / Manjaro / openSUSE
 # ==========================================
 
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ==========================================
+# DIRECTORY CONFIGURATION
+# ==========================================
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$BASE_DIR/logs"
 BACKUP_DIR="$BASE_DIR/backups"
 
 mkdir -p "$LOG_DIR" "$BACKUP_DIR"
 
-LOG_FILE="$LOG_DIR/ufw_config.log"
+LOG_FILE="$LOG_DIR/firewall_config.log"
 
 log() {
     echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"
 }
 
-# ------------------------------------------
+# ==========================================
 # ROOT CHECK
-# ------------------------------------------
+# ==========================================
 
 if [[ $EUID -ne 0 ]]; then
-    echo "Administrator privileges are required."
-    echo "Run through sudo:"
-    echo "sudo bash UFW_Config.sh"
+    echo "Administrator privileges required."
+    echo "Run: sudo bash Firewall_Config.sh"
     exit 1
 fi
 
-# ------------------------------------------
-# DISTRIBUTION CHECK
-# ------------------------------------------
+# ==========================================
+# DISTRIBUTION DETECTION
+# ==========================================
 
 if [[ ! -f /etc/os-release ]]; then
     echo "Cannot identify Linux distribution."
@@ -40,244 +45,437 @@ fi
 
 source /etc/os-release
 
-if [[ "$ID" != "ubuntu" && "$ID" != "debian" &&
-      "$ID" != "linuxmint" && "$ID" != "pop" &&
-      " ${ID_LIKE:-} " != *" debian "* ]]; then
-    echo "This script is designed for Debian-based distributions."
+DISTRO="${ID,,}"
+FAMILY="${ID_LIKE:-}"
+
+# ==========================================
+# FIREWALL BACKEND SELECTION
+# ==========================================
+
+if [[ "$DISTRO" == "ubuntu" ||
+      "$DISTRO" == "debian" ||
+      "$DISTRO" == "linuxmint" ||
+      "$DISTRO" == "pop" ||
+      "$FAMILY" == *debian* ]]; then
+
+    FIREWALL="ufw"
+    PACKAGE_MANAGER="apt"
+
+elif [[ "$DISTRO" == "fedora" ||
+        "$DISTRO" == "rhel" ||
+        "$DISTRO" == "rocky" ||
+        "$DISTRO" == "almalinux" ||
+        "$DISTRO" == "ol" ||
+        "$FAMILY" == *rhel* ||
+        "$FAMILY" == *fedora* ]]; then
+
+    FIREWALL="firewalld"
+    PACKAGE_MANAGER="dnf"
+
+elif [[ "$DISTRO" == "arch" ||
+        "$DISTRO" == "manjaro" ||
+        "$DISTRO" == "endeavouros" ||
+        "$FAMILY" == *arch* ]]; then
+
+    FIREWALL="firewalld"
+    PACKAGE_MANAGER="pacman"
+
+elif [[ "$DISTRO" == *opensuse* ||
+        "$FAMILY" == *suse* ]]; then
+
+    FIREWALL="firewalld"
+    PACKAGE_MANAGER="zypper"
+
+else
+    echo "Unsupported distribution: $PRETTY_NAME"
     exit 1
 fi
 
-# ------------------------------------------
+# ==========================================
 # HEADER
-# ------------------------------------------
+# ==========================================
 
 clear
 
 echo "=========================================="
-echo "       CYBERPATRIOT UFW CONFIGURATION"
+echo "       CYBERPATRIOT FIREWALL MANAGER"
 echo "=========================================="
 echo "Distribution: $PRETTY_NAME"
-echo
+echo "Firewall:     $FIREWALL"
+echo "=========================================="
 
-log "UFW configuration started on $PRETTY_NAME"
+log "Firewall configuration started: $PRETTY_NAME"
 
-# ------------------------------------------
-# CHECK INSTALLATION
-# ------------------------------------------
+# ==========================================
+# INSTALL FIREWALL IF NECESSARY
+# ==========================================
 
-if ! command -v ufw >/dev/null 2>&1; then
+if ! command -v "$FIREWALL" >/dev/null 2>&1; then
 
-    echo "UFW is not installed."
-    read -rp "Install UFW using APT? (yes/no): " INSTALL
+    echo
+    echo "$FIREWALL is not installed."
+
+    read -rp "Install $FIREWALL? (yes/no): " INSTALL
 
     if [[ "$INSTALL" != "yes" ]]; then
-        log "UFW installation declined."
+        log "Firewall installation declined."
         exit 0
     fi
 
-    apt-get update &&
-        apt-get install ufw || {
-        echo "UFW installation failed."
-        log "UFW installation failed."
+    case "$PACKAGE_MANAGER" in
+
+        apt)
+            apt-get update &&
+            apt-get install -y ufw
+            ;;
+
+        dnf)
+            dnf install -y firewalld
+            ;;
+
+        pacman)
+            pacman -S --needed firewalld
+            ;;
+
+        zypper)
+            zypper --non-interactive install firewalld
+            ;;
+
+    esac
+
+    if [[ $? -ne 0 ]]; then
+        echo "Firewall installation failed."
+        log "Firewall installation failed."
         exit 1
-    }
+    fi
 fi
 
-# ------------------------------------------
-# SHOW CURRENT RULES
-# ------------------------------------------
+# ==========================================
+# BACKUP CONFIGURATION
+# ==========================================
 
-echo
-echo "=========================================="
-echo "       CURRENT FIREWALL STATUS"
-echo "=========================================="
-
-ufw status verbose
-
-echo
-echo "Current numbered rules:"
-ufw status numbered
-
-echo
-echo "WARNING:"
-echo "Existing firewall rules will NOT be deleted."
-echo "Review existing ALLOW rules before proceeding."
-echo "Existing explicit allow rules can override"
-echo "the intended default-deny incoming policy."
-
-read -rp "Continue with firewall configuration? (yes/no): " CONTINUE
-
-if [[ "$CONTINUE" != "yes" ]]; then
-    log "Firewall configuration cancelled."
-    exit 0
-fi
-
-# ------------------------------------------
-# BACKUP
-# ------------------------------------------
-
-BACKUP="$BACKUP_DIR/ufw_$(date +%Y%m%d_%H%M%S)"
+BACKUP="$BACKUP_DIR/firewall_$(date +%Y%m%d_%H%M%S)"
 
 mkdir -p "$BACKUP"
 
-if [[ -d /etc/ufw ]]; then
-    cp -a /etc/ufw "$BACKUP/"
-fi
+if [[ "$FIREWALL" == "ufw" ]]; then
 
-ufw status verbose > "$BACKUP/status.txt" 2>&1
+    if [[ -d /etc/ufw ]]; then
+        cp -a /etc/ufw "$BACKUP/"
+    fi
+
+    if [[ -f /etc/default/ufw ]]; then
+        cp -a /etc/default/ufw "$BACKUP/"
+    fi
+
+else
+
+    if [[ -d /etc/firewalld ]]; then
+        cp -a /etc/firewalld "$BACKUP/"
+    fi
+
+fi
 
 log "Firewall backup created: $BACKUP"
 
-# ------------------------------------------
-# SSH PROTECTION
-# ------------------------------------------
+# ==========================================
+# UFW CONFIGURATION
+# ==========================================
 
-SSH_PORT=""
-
-if [[ -n "${SSH_CONNECTION:-}" ]]; then
-
-    SSH_PORT=$(awk '{print $4}' <<< "$SSH_CONNECTION")
+configure_ufw() {
 
     echo
-    echo "Active SSH connection detected."
-    echo "Current SSH server port: $SSH_PORT"
+    echo "=========================================="
+    echo "          CURRENT UFW STATUS"
+    echo "=========================================="
 
-    read -rp "Protect this SSH connection with a UFW rate-limit rule? (yes/no): " SSH_ALLOW
-
-elif systemctl is-active --quiet ssh 2>/dev/null ||
-     systemctl is-active --quiet sshd 2>/dev/null; then
+    ufw status verbose
+    echo
+    ufw status numbered
 
     echo
-    echo "SSH service appears to be running."
+    echo "Existing firewall rules will be preserved."
+    echo "Review existing ALLOW rules carefully."
 
-    read -rp "Allow SSH on the default port 22? (yes/no): " SSH_ALLOW
+    read -rp "Continue? (yes/no): " CONTINUE
+
+    if [[ "$CONTINUE" != "yes" ]]; then
+        log "UFW configuration cancelled."
+        return
+    fi
+
+    # SSH DETECTION
+
+    SSH_PORT=""
+
+    if [[ -n "${SSH_CONNECTION:-}" ]]; then
+
+        SSH_PORT=$(awk '{print $4}' <<< "$SSH_CONNECTION")
+
+        echo
+        echo "SSH connection detected."
+        echo "Server port: $SSH_PORT"
+
+        read -rp "Allow and rate-limit this SSH port? (yes/no): " SSH_ALLOW
+
+    elif command -v ss >/dev/null 2>&1 &&
+         ss -lntp 2>/dev/null | grep -q sshd; then
+
+        echo
+        echo "SSH service appears to be listening."
+
+        read -rp "Allow and rate-limit SSH on port 22? (yes/no): " SSH_ALLOW
+
+        [[ "$SSH_ALLOW" == "yes" ]] && SSH_PORT=22
+
+    else
+
+        SSH_ALLOW="no"
+        echo "No SSH listener detected."
+
+    fi
 
     if [[ "$SSH_ALLOW" == "yes" ]]; then
-        SSH_PORT=22
+
+        if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] ||
+           (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+
+            echo "Invalid SSH port."
+            return
+
+        fi
+
     fi
 
-else
-    SSH_ALLOW="no"
     echo
-    echo "No active SSH connection or running SSH service detected."
-fi
+    echo "=========================================="
+    echo "          PROPOSED UFW POLICY"
+    echo "=========================================="
 
-if [[ "$SSH_ALLOW" == "yes" ]]; then
+    echo "Incoming: DENY"
+    echo "Outgoing: ALLOW"
+    echo "Routed:   DENY"
+    echo "Logging:  ON"
 
-    if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] ||
-       (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
-
-        echo "Invalid SSH port."
-        exit 1
-    fi
-
-fi
-
-# ------------------------------------------
-# APPLY FIREWALL DEFAULTS
-# ------------------------------------------
-
-echo
-echo "=========================================="
-echo "       PROPOSED FIREWALL POLICY"
-echo "=========================================="
-
-echo "Incoming: DENY"
-echo "Outgoing: ALLOW"
-echo "Routed:   DENY"
-echo "Logging:  ON"
-
-if [[ "$SSH_ALLOW" == "yes" ]]; then
-    echo "SSH: Rate limited on TCP port $SSH_PORT"
-else
-    echo "SSH: No new SSH allow rule"
-fi
-
-echo
-echo "WARNING: Enabling UFW may interrupt network"
-echo "services that depend on incoming connections."
-
-read -rp "Apply these firewall defaults? (yes/no): " CONFIRM
-
-if [[ "$CONFIRM" != "yes" ]]; then
-    log "Firewall changes declined."
-    exit 0
-fi
-
-# ------------------------------------------
-# APPLY RULES
-# ------------------------------------------
-
-FAILED=0
-
-ufw default deny incoming || FAILED=1
-ufw default allow outgoing || FAILED=1
-ufw default deny routed || FAILED=1
-
-if [[ "$SSH_ALLOW" == "yes" ]]; then
-
-    ufw limit "$SSH_PORT/tcp" || FAILED=1
-
-fi
-
-ufw logging on || FAILED=1
-
-if [[ "$FAILED" -ne 0 ]]; then
-    echo
-    echo "One or more firewall rules failed."
-    echo "Review UFW status before enabling."
-    log "Firewall configuration encountered errors."
-    exit 1
-fi
-
-# ------------------------------------------
-# ENABLE FIREWALL
-# ------------------------------------------
-
-echo
-echo "=========================================="
-echo "       FIREWALL ACTIVATION"
-echo "=========================================="
-
-echo "Review the proposed configuration."
-read -rp "Enable UFW now? (yes/no): " ENABLE
-
-if [[ "$ENABLE" == "yes" ]]; then
-
-    if ufw enable; then
-        echo "UFW enabled successfully."
-        log "UFW successfully enabled."
+    if [[ "$SSH_ALLOW" == "yes" ]]; then
+        echo "SSH: Rate limited on port $SSH_PORT"
     else
-        echo "UFW activation failed."
-        log "UFW activation failed."
-        exit 1
+        echo "SSH: No new allow rule"
     fi
 
+    echo
+    echo "WARNING: Existing allow rules remain."
+    echo "This may affect network services."
+
+    read -rp "Apply firewall defaults? (yes/no): " CONFIRM
+
+    if [[ "$CONFIRM" != "yes" ]]; then
+        log "UFW changes declined."
+        return
+    fi
+
+    FAILED=0
+
+    ufw default deny incoming || FAILED=1
+    ufw default allow outgoing || FAILED=1
+    ufw default deny routed || FAILED=1
+
+    if [[ "$SSH_ALLOW" == "yes" ]]; then
+        ufw limit "$SSH_PORT/tcp" || FAILED=1
+    fi
+
+    ufw logging on || FAILED=1
+
+    if [[ "$FAILED" -ne 0 ]]; then
+        echo "Firewall configuration encountered errors."
+        log "UFW configuration failed."
+        return
+    fi
+
+    echo
+    read -rp "Enable UFW now? (yes/no): " ENABLE
+
+    if [[ "$ENABLE" == "yes" ]]; then
+
+        if ufw --force enable; then
+            echo "UFW enabled successfully."
+            log "UFW enabled."
+        else
+            echo "UFW activation failed."
+            log "UFW activation failed."
+            return
+        fi
+
+    else
+
+        echo "UFW rules configured but not enabled."
+        log "UFW activation deferred."
+
+    fi
+
+    echo
+    ufw status verbose
+}
+
+# ==========================================
+# FIREWALLD CONFIGURATION
+# ==========================================
+
+configure_firewalld() {
+
+    echo
+    echo "=========================================="
+    echo "         CURRENT FIREWALLD STATUS"
+    echo "=========================================="
+
+    systemctl status firewalld --no-pager 2>/dev/null || true
+
+    echo
+    echo "Default zone:"
+    firewall-cmd --get-default-zone
+
+    echo
+    echo "Active zones:"
+    firewall-cmd --get-active-zones
+
+    echo
+    echo "Current firewall configuration:"
+
+    firewall-cmd --list-all
+
+    echo
+    echo "Existing zones, services and rules will be preserved."
+    echo "No firewall zone will be replaced."
+
+    read -rp "Continue? (yes/no): " CONTINUE
+
+    if [[ "$CONTINUE" != "yes" ]]; then
+        log "Firewalld configuration cancelled."
+        return
+    fi
+
+    # SSH PROTECTION
+
+    echo
+    echo "Does this machine need incoming SSH access?"
+    read -rp "Allow the standard SSH service (port 22)? (yes/no): " SSH_ALLOW
+
+    if [[ "$SSH_ALLOW" == "yes" ]]; then
+
+        echo
+        echo "SSH will be added to the current default zone."
+        echo "This uses the standard SSH service definition."
+
+        read -rp "Confirm SSH access? (yes/no): " SSH_CONFIRM
+
+    else
+
+        SSH_CONFIRM="no"
+
+    fi
+
+    echo
+    echo "=========================================="
+    echo "       PROPOSED FIREWALL POLICY"
+    echo "=========================================="
+
+    echo "Existing firewalld zone: preserved"
+    echo "Existing allowed services: preserved"
+    echo "Unsolicited incoming traffic: default zone policy"
+    echo "Outgoing traffic: unchanged"
+    echo "Existing forwarding policies: unchanged"
+
+    if [[ "$SSH_CONFIRM" == "yes" ]]; then
+        echo "SSH service: Allow port 22"
+    else
+        echo "SSH service: No new SSH rule"
+    fi
+
+    echo
+    echo "WARNING: Firewall activation may interrupt"
+    echo "incoming network services."
+
+    read -rp "Apply this configuration? (yes/no): " CONFIRM
+
+    if [[ "$CONFIRM" != "yes" ]]; then
+        log "Firewalld changes declined."
+        return
+    fi
+
+    if ! systemctl enable --now firewalld; then
+        echo "Could not start firewalld."
+        log "Firewalld activation failed."
+        return
+    fi
+
+    if [[ "$SSH_CONFIRM" == "yes" ]]; then
+
+        if ! firewall-cmd --add-service=ssh --permanent; then
+            echo "Could not add SSH service."
+            log "SSH service configuration failed."
+            return
+        fi
+
+    fi
+
+    if ! firewall-cmd --reload; then
+        echo "Firewall reload failed."
+        log "Firewalld reload failed."
+        return
+    fi
+
+    echo
+    echo "Firewalld is running."
+
+    firewall-cmd --list-all
+
+    log "Firewalld configuration completed."
+}
+
+# ==========================================
+# MAIN FIREWALL MENU
+# ==========================================
+
+echo
+echo "Detected firewall backend: $FIREWALL"
+
+case "$FIREWALL" in
+
+    ufw)
+        configure_ufw
+        ;;
+
+    firewalld)
+        configure_firewalld
+        ;;
+
+esac
+
+# ==========================================
+# FINAL STATUS
+# ==========================================
+
+echo
+echo "=========================================="
+echo "         FINAL FIREWALL STATUS"
+echo "=========================================="
+
+if [[ "$FIREWALL" == "ufw" ]]; then
+
+    ufw status verbose
+
 else
-    echo "Rules configured but firewall not enabled."
-    log "UFW activation deferred."
+
+    firewall-cmd --state
+    firewall-cmd --list-all
+
 fi
 
-# ------------------------------------------
-# FINAL STATUS
-# ------------------------------------------
-
 echo
-echo "=========================================="
-echo "       FINAL FIREWALL STATUS"
-echo "=========================================="
+echo "Backup: $BACKUP"
+echo "Log: $LOG_FILE"
 
-ufw status verbose
-
-log "UFW configuration finished."
-
-echo
-echo "Log saved to:"
-echo "$LOG_FILE"
-
-echo
-echo "Backup saved to:"
-echo "$BACKUP"
+log "Firewall management finished."
 
 echo
 read -rp "Press Enter to return to launcher..."
