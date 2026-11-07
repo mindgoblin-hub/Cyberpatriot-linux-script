@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 # ==========================================
@@ -6,10 +5,10 @@
 # ==========================================
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_DIR="$BASE_DIR/scripts"
+SCRIPT_DIR="$BASE_DIR"
 LOG_DIR="$BASE_DIR/logs"
 
-mkdir -p "$SCRIPT_DIR" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
 LOG_FILE="$LOG_DIR/cyberpatriot.log"
 
