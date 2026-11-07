@@ -1,13 +1,19 @@
-
 #!/bin/bash
 
 # ==========================================
-# CYBERPATRIOT MEDIA FILE AUDIT
-# Debian / Ubuntu / APT distributions
+# CYBERPATRIOT UNIVERSAL MEDIA FILE AUDIT
+# Ubuntu / Debian / Mint / Pop!_OS
+# Fedora / RHEL / Rocky / AlmaLinux
+# Arch / Manjaro / openSUSE
 # ==========================================
 
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# ==========================================
+# DIRECTORY CONFIGURATION
+# ==========================================
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$BASE_DIR/logs"
+
 mkdir -p "$LOG_DIR"
 
 LOG_FILE="$LOG_DIR/media_audit.log"
@@ -16,19 +22,30 @@ log() {
     echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"
 }
 
-# ------------------------------------------
+# ==========================================
 # ROOT CHECK
-# ------------------------------------------
+# ==========================================
 
 if [[ $EUID -ne 0 ]]; then
-    echo "Run with administrator privileges:"
-    echo "sudo bash Media_Audit.sh"
+    echo "Administrator privileges required."
+    echo "Run: sudo bash Media_Audit.sh"
     exit 1
 fi
 
-# ------------------------------------------
+# ==========================================
+# DISTRIBUTION DETECTION
+# ==========================================
+
+if [[ -f /etc/os-release ]]; then
+    source /etc/os-release
+    DISTRO="$PRETTY_NAME"
+else
+    DISTRO="Unknown Linux"
+fi
+
+# ==========================================
 # MEDIA EXTENSIONS
-# ------------------------------------------
+# ==========================================
 
 EXTENSIONS=(
     mp3 wav flac aac ogg m4a wma
@@ -37,19 +54,22 @@ EXTENSIONS=(
     iso
 )
 
-# ------------------------------------------
+# ==========================================
 # SEARCH LOCATION
-# ------------------------------------------
+# ==========================================
+
+clear
 
 echo "=========================================="
-echo "       CYBERPATRIOT MEDIA FILE AUDIT"
+echo "     CYBERPATRIOT MEDIA FILE AUDIT"
 echo "=========================================="
-
+echo "Distribution: $DISTRO"
 echo
+
 echo "Choose search location:"
 echo
 echo "1. Home directories"
-echo "2. Entire filesystem (excluding virtual filesystems)"
+echo "2. Entire filesystem"
 echo "3. Custom directory"
 echo "0. Exit"
 
@@ -72,6 +92,8 @@ case "$OPTION" in
             echo "Directory does not exist."
             exit 1
         fi
+
+        SEARCH_DIR="$(realpath -e -- "$SEARCH_DIR")"
         ;;
 
     0)
@@ -85,15 +107,18 @@ case "$OPTION" in
 
 esac
 
-# ------------------------------------------
+# ==========================================
 # FIND MEDIA FILES
-# ------------------------------------------
+# ==========================================
 
 echo
 echo "[INFO] Searching for media files..."
 echo "Location: $SEARCH_DIR"
 
-TEMP_FILE=$(mktemp)
+log "Media audit started on $DISTRO"
+log "Search location: $SEARCH_DIR"
+
+TEMP_FILE=$(mktemp) || exit 1
 trap 'rm -f "$TEMP_FILE"' EXIT
 
 FIND_ARGS=()
@@ -104,16 +129,24 @@ done
 
 unset 'FIND_ARGS[${#FIND_ARGS[@]}-1]'
 
+# Exclude virtual filesystems and toolkit directory
 find "$SEARCH_DIR" \
-    \( -path /proc -o -path /sys -o -path /dev \
-       -o -path /run -o -path /tmp \
-       -o -path "$BASE_DIR" \) -prune -o \
+    \( \
+        -path /proc -o \
+        -path /sys -o \
+        -path /dev -o \
+        -path /run -o \
+        -path /tmp -o \
+        -path /snap -o \
+        -path /var/lib -o \
+        -path "$BASE_DIR" \
+    \) -prune -o \
     -type f \( "${FIND_ARGS[@]}" \) \
     -print0 2>/dev/null > "$TEMP_FILE"
 
-# ------------------------------------------
-# REVIEW FILES INDIVIDUALLY
-# ------------------------------------------
+# ==========================================
+# REVIEW FILES
+# ==========================================
 
 COUNT=0
 DELETED=0
@@ -122,7 +155,7 @@ FAILED=0
 
 echo
 echo "=========================================="
-echo "       MEDIA FILE REVIEW"
+echo "         MEDIA FILE REVIEW"
 echo "=========================================="
 
 while IFS= read -r -d '' FILE; do
@@ -134,13 +167,16 @@ while IFS= read -r -d '' FILE; do
     echo "File #$COUNT"
     echo "Name: $(basename "$FILE")"
     echo "Location: $FILE"
-    echo "Size: $(du -h "$FILE" 2>/dev/null | cut -f1)"
+
+    SIZE=$(du -h -- "$FILE" 2>/dev/null | cut -f1)
+    echo "Size: ${SIZE:-Unknown}"
+
     echo "------------------------------------------"
 
     echo
     echo "1. Delete this file"
     echo "2. Keep this file"
-    echo "3. Skip remaining review and exit"
+    echo "3. Stop reviewing"
 
     read -rp "Choose an action: " ACTION
 
@@ -154,23 +190,28 @@ while IFS= read -r -d '' FILE; do
 
             if [[ "$CONFIRM" == "DELETE" ]]; then
 
-                # Do not follow symlinks or remove directories.
                 if [[ -f "$FILE" && ! -L "$FILE" ]] &&
                    rm -i -- "$FILE"; then
 
-                    echo "File removed."
-                    log "DELETED: $FILE"
-                    DELETED=$((DELETED + 1))
+                    if [[ ! -e "$FILE" ]]; then
+                        echo "File removed."
+                        log "DELETED: $FILE"
+                        DELETED=$((DELETED + 1))
+                    else
+                        echo "File retained."
+                        log "REMOVAL DECLINED: $FILE"
+                        KEPT=$((KEPT + 1))
+                    fi
 
                 else
-                    echo "File was not removed."
-                    log "REMOVAL FAILED OR DECLINED: $FILE"
+                    echo "File could not be removed."
+                    log "REMOVAL FAILED: $FILE"
                     FAILED=$((FAILED + 1))
                 fi
 
             else
                 echo "Deletion cancelled."
-                log "Deletion declined: $FILE"
+                log "DELETION DECLINED: $FILE"
                 KEPT=$((KEPT + 1))
             fi
             ;;
@@ -182,13 +223,13 @@ while IFS= read -r -d '' FILE; do
             ;;
 
         3)
-            echo "Review stopped by user."
+            echo "Review stopped."
             break
             ;;
 
         *)
-            echo "Invalid option. File retained."
-            log "Invalid selection; retained: $FILE"
+            echo "Invalid selection. File retained."
+            log "INVALID SELECTION: $FILE"
             KEPT=$((KEPT + 1))
             ;;
 
@@ -196,25 +237,27 @@ while IFS= read -r -d '' FILE; do
 
 done < "$TEMP_FILE"
 
-# ------------------------------------------
+# ==========================================
 # SUMMARY
-# ------------------------------------------
+# ==========================================
 
 echo
 echo "=========================================="
-echo "       MEDIA AUDIT SUMMARY"
+echo "         MEDIA AUDIT SUMMARY"
 echo "=========================================="
 
-echo "Files discovered: $COUNT"
-echo "Files deleted:    $DELETED"
-echo "Files retained:   $KEPT"
+echo "Distribution:    $DISTRO"
+echo "Files reviewed:  $COUNT"
+echo "Files deleted:   $DELETED"
+echo "Files retained:  $KEPT"
 echo "Removal failures: $FAILED"
 
 echo
 echo "Log saved to:"
 echo "$LOG_FILE"
 
-log "Audit finished. Found: $COUNT Deleted: $DELETED Kept: $KEPT Failed: $FAILED"
+log "Audit finished."
+log "Found: $COUNT | Deleted: $DELETED | Kept: $KEPT | Failed: $FAILED"
 
 echo
 read -rp "Press Enter to return to launcher..."
