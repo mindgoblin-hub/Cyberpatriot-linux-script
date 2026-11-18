@@ -201,6 +201,18 @@ for SERVICE in "${SERVICE_NAMES[@]}"; do
                 check INFO "$SERVICE detected but not active."
             fi
             ;;
+
+        apache2.service|httpd.service)
+            if [[ "$ACTIVE_STATE" == "active" ||
+                  "$ENABLE_STATE" == "enabled" ]]; then
+
+                check WARNING "$SERVICE is active or enabled and should be reviewed."
+
+            else
+                check PASS "$SERVICE is not active and not enabled."
+            fi
+            ;;
+
         *)
             check INFO "$SERVICE inventory recorded."
             ;;
@@ -308,7 +320,81 @@ echo "Log: $LOG"
 echo "Inventory: $REPORT"
 
 log "Service audit complete: PASS=$PASS WARNING=$WARN CRITICAL=$CRITICAL INFO=$INFO"
+# ==================================================
+# APACHE2 / HTTPD HARDENING
+# ==================================================
 
+echo
+echo "[7] APACHE WEB SERVER HARDENING"
+echo "----------------------------------------------"
+
+APACHE_SERVICE=""
+
+if systemctl list-unit-files apache2.service \
+    --no-legend 2>/dev/null | grep -Fq "apache2.service"; then
+
+    APACHE_SERVICE="apache2.service"
+
+elif systemctl list-unit-files httpd.service \
+    --no-legend 2>/dev/null | grep -Fq "httpd.service"; then
+
+    APACHE_SERVICE="httpd.service"
+
+fi
+
+if [[ -n "$APACHE_SERVICE" ]]; then
+
+    APACHE_ACTIVE="$(systemctl is-active "$APACHE_SERVICE" 2>/dev/null || true)"
+    APACHE_ENABLED="$(systemctl is-enabled "$APACHE_SERVICE" 2>/dev/null || true)"
+
+    echo "Detected: $APACHE_SERVICE"
+    echo "Status: $APACHE_ACTIVE"
+    echo "Enabled: $APACHE_ENABLED"
+    echo
+
+    if [[ "$APACHE_ACTIVE" == "active" ||
+          "$APACHE_ENABLED" == "enabled" ]]; then
+
+        echo "Apache web server is currently active or enabled."
+        echo "CyberPatriot may require Apache to be disabled."
+        echo
+
+        read -rp "Disable $APACHE_SERVICE? (y/n): " DISABLE_APACHE
+
+        if [[ "$DISABLE_APACHE" =~ ^[Yy]$ ]]; then
+
+            echo
+            echo "Disabling $APACHE_SERVICE..."
+
+            if systemctl disable --now "$APACHE_SERVICE"; then
+
+                check PASS "$APACHE_SERVICE stopped and disabled."
+
+                FINAL_ACTIVE="$(systemctl is-active "$APACHE_SERVICE" 2>/dev/null || true)"
+                FINAL_ENABLED="$(systemctl is-enabled "$APACHE_SERVICE" 2>/dev/null || true)"
+
+                echo
+                echo "Final status:"
+                echo "  Active:  $FINAL_ACTIVE"
+                echo "  Enabled: $FINAL_ENABLED"
+
+            else
+                check WARNING "Could not stop and disable $APACHE_SERVICE."
+            fi
+
+        else
+            check WARNING "$APACHE_SERVICE was left unchanged."
+        fi
+
+    else
+        check PASS "$APACHE_SERVICE is already stopped and disabled."
+    fi
+
+else
+    check INFO "Apache web server is not installed."
+fi
+
+echo
 # ==================================================
 # INTERACTIVE SERVICE HARDENING
 # ==================================================
