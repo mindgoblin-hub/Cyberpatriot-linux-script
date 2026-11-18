@@ -570,7 +570,166 @@ view_account_aging() {
     read -rp "Press Enter to continue..."
 
 }
+# ==========================================
+# CONFIGURE ACCOUNT LOCKOUT POLICY
+# ==========================================
 
+configure_lockout() {
+
+    echo
+    echo "=========================================="
+    echo "       ACCOUNT LOCKOUT POLICY"
+    echo "=========================================="
+
+    echo "Proposed lockout policy:"
+    echo "  Failed attempts: 5"
+    echo "  Lockout duration: 15 minutes"
+    echo "  Failed-attempt reset interval: 15 minutes"
+    echo
+
+    read -rp "Apply account lockout policy? (yes/no): " CONFIRM
+
+    if [[ "$CONFIRM" != "yes" ]]; then
+        log "Account lockout configuration declined."
+        return
+    fi
+
+    case "$PM" in
+
+        apt)
+
+            echo
+            echo "Configuring pam_faillock..."
+
+            if ! command -v pam-auth-update >/dev/null 2>&1; then
+                echo "pam-auth-update is unavailable."
+                echo "Manual PAM configuration may be required."
+                log "Account lockout configuration failed: pam-auth-update unavailable."
+                return
+            fi
+
+            if ! grep -RqsE 'pam_faillock\.so' /etc/pam.d 2>/dev/null; then
+                echo "pam_faillock is not currently configured."
+                echo "Attempting to enable it through the available PAM configuration."
+            fi
+
+            if [[ -d /etc/security ]]; then
+                cat > /etc/security/faillock.conf <<'EOF'
+# CyberPatriot Account Lockout Policy
+deny = 5
+fail_interval = 900
+unlock_time = 900
+EOF
+
+                log "Created /etc/security/faillock.conf"
+                echo "Created /etc/security/faillock.conf"
+            fi
+
+            if grep -RqsE 'pam_faillock\.so' /etc/pam.d 2>/dev/null; then
+                echo "pam_faillock PAM configuration detected."
+                log "pam_faillock PAM configuration detected."
+            else
+                echo
+                echo "WARNING: pam_faillock is not referenced by the PAM configuration."
+                echo "The faillock policy file was created, but PAM may still require configuration."
+                log "WARNING: pam_faillock PAM module not detected."
+            fi
+            ;;
+
+        dnf)
+
+            echo
+            echo "Configuring account lockout through authselect..."
+
+            if ! command -v authselect >/dev/null 2>&1; then
+                echo "authselect is not installed."
+                echo "Manual PAM configuration may be required."
+                log "Account lockout configuration failed: authselect unavailable."
+                return
+            fi
+
+            if ! authselect check >/dev/null 2>&1; then
+                echo "authselect configuration check failed."
+                echo "Review the existing authentication configuration before continuing."
+                log "Account lockout configuration aborted: authselect check failed."
+                return
+            fi
+
+            if authselect current -r 2>/dev/null | grep -q "with-faillock"; then
+                echo "faillock is already enabled through authselect."
+            else
+                echo "Enabling faillock through authselect..."
+
+                if authselect enable-feature with-faillock &&
+                   authselect apply-changes; then
+
+                    echo "faillock enabled successfully."
+                    log "Enabled faillock through authselect."
+
+                else
+                    echo "Failed to enable faillock."
+                    log "Failed to enable faillock through authselect."
+                    return
+                fi
+            fi
+
+            if [[ -d /etc/security ]]; then
+                cat > /etc/security/faillock.conf <<'EOF'
+# CyberPatriot Account Lockout Policy
+deny = 5
+fail_interval = 900
+unlock_time = 900
+EOF
+
+                echo "Created /etc/security/faillock.conf"
+                log "Created /etc/security/faillock.conf"
+            fi
+            ;;
+
+        pacman|zypper)
+
+            echo
+            echo "This distribution requires manual PAM integration"
+            echo "for pam_faillock."
+            echo
+
+            if [[ -d /etc/security ]]; then
+
+                cat > /etc/security/faillock.conf <<'EOF'
+# CyberPatriot Account Lockout Policy
+deny = 5
+fail_interval = 900
+unlock_time = 900
+EOF
+
+                echo "Created /etc/security/faillock.conf"
+                log "Created /etc/security/faillock.conf"
+
+                echo
+                echo "WARNING: PAM must reference pam_faillock.so"
+                echo "for this policy to actually enforce account lockouts."
+
+            fi
+            ;;
+
+    esac
+
+    echo
+    echo "=========================================="
+    echo "       LOCKOUT CONFIGURATION"
+    echo "=========================================="
+
+    if [[ -f /etc/security/faillock.conf ]]; then
+        echo
+        cat /etc/security/faillock.conf
+        echo
+        log "Account lockout policy configured."
+    else
+        echo "faillock.conf was not created."
+        log "Account lockout policy configuration unsuccessful."
+    fi
+
+}
 # ==========================================
 # MAIN MENU
 # ==========================================
@@ -593,6 +752,7 @@ while true; do
     echo "6. Force password changes"
     echo "7. View account password aging"
     echo "8. View password configuration log"
+    echo "9. Configure account lockout policy"
     echo "0. Return to main launcher"
     echo
     echo "=========================================="
@@ -643,6 +803,11 @@ while true; do
             else
                 echo "No logs available."
             fi
+            read -rp "Press Enter to continue..."
+            ;;
+
+        9)
+            configure_lockout
             read -rp "Press Enter to continue..."
             ;;
 
