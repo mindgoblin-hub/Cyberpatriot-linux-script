@@ -1,4 +1,4 @@
-
+```bash
 #!/bin/bash
 
 # ==================================================
@@ -69,6 +69,67 @@ check_sysctl() {
     else
         check WARNING "$DESCRIPTION: current=$CURRENT expected=$EXPECTED"
     fi
+}
+
+# ==================================================
+# PASSWORD HASHING DETECTION
+# ==================================================
+
+get_password_hash_method() {
+
+    local METHOD=""
+
+    # First check login.defs
+    if [[ -r /etc/login.defs ]]; then
+
+        METHOD="$(grep -E \
+            '^[[:space:]]*ENCRYPT_METHOD[[:space:]]+' \
+            /etc/login.defs 2>/dev/null |
+            awk '{print $2}' |
+            tail -n 1)"
+
+    fi
+
+    # Fedora/RHEL systems may use authselect/PAM configuration
+    if [[ -z "$METHOD" ]]; then
+
+        METHOD="$(grep -RhoE \
+            'yescrypt|sha512|sha256|md5' \
+            /etc/pam.d /etc/authselect 2>/dev/null |
+            head -n 1)"
+
+    fi
+
+    echo "$METHOD"
+}
+
+password_hash_is_secure() {
+
+    local METHOD="$1"
+
+    case "${METHOD,,}" in
+
+        yescrypt)
+            return 0
+            ;;
+
+        sha512)
+            return 0
+            ;;
+
+        sha256)
+            return 1
+            ;;
+
+        md5|des)
+            return 1
+            ;;
+
+        *)
+            return 1
+            ;;
+
+    esac
 }
 
 # ==================================================
@@ -146,13 +207,19 @@ if [[ -f /etc/security/limits.conf ]]; then
 
     if grep -Eq '^[[:space:]]*\*[[:space:]]+hard[[:space:]]+core[[:space:]]+0' \
         /etc/security/limits.conf; then
+
         check PASS "Core dump hard limit found in limits.conf."
+
     else
+
         check WARNING "Core dump hard limit not explicitly configured in limits.conf."
+
     fi
 
 else
+
     check INFO "limits.conf not found."
+
 fi
 
 echo
@@ -203,6 +270,17 @@ check_sysctl \
     net.ipv6.conf.default.accept_redirects \
     0 \
     "Default IPv6 redirect protection"
+
+# Log impossible/martian IPv4 addresses
+check_sysctl \
+    net.ipv4.conf.all.log_martians \
+    1 \
+    "IPv4 martian packet logging"
+
+check_sysctl \
+    net.ipv4.conf.default.log_martians \
+    1 \
+    "Default IPv4 martian packet logging"
 
 echo
 
@@ -257,7 +335,9 @@ if command -v lsmod >/dev/null 2>&1; then
     check INFO "Loaded kernel modules inventoried."
 
 else
+
     check WARNING "lsmod command unavailable."
+
 fi
 
 echo
@@ -284,7 +364,9 @@ if [[ -d /lib/modules/"$(uname -r)" ]]; then
     done
 
 else
+
     check WARNING "Kernel module directory not found."
+
 fi
 
 echo
@@ -307,7 +389,9 @@ if [[ -r /sys/module/module/parameters/sig_enforce ]]; then
     fi
 
 else
+
     check INFO "Module signature enforcement status unavailable."
+
 fi
 
 echo
@@ -327,7 +411,9 @@ if [[ -r /sys/kernel/security/lockdown ]]; then
     check INFO "Kernel lockdown status retrieved."
 
 else
+
     check INFO "Kernel lockdown interface unavailable."
+
 fi
 
 echo
@@ -354,7 +440,9 @@ if [[ -f /etc/sysctl.conf ]]; then
     fi
 
 else
+
     check INFO "/etc/sysctl.conf does not exist."
+
 fi
 
 if [[ -d /etc/sysctl.d ]]; then
@@ -366,6 +454,51 @@ if [[ -d /etc/sysctl.d ]]; then
         -name '*.conf' -print 2>/dev/null
 
     check INFO "Additional sysctl configuration inventory collected."
+
+fi
+
+echo
+
+# ==================================================
+# PASSWORD HASHING SECURITY AUDIT
+# ==================================================
+
+echo "[12] PASSWORD HASHING SECURITY"
+echo "----------------------------------------------"
+
+HASH_METHOD="$(get_password_hash_method)"
+
+if [[ -n "$HASH_METHOD" ]]; then
+
+    echo "Detected password hashing method: $HASH_METHOD"
+
+    if password_hash_is_secure "$HASH_METHOD"; then
+
+        check PASS "Secure password hashing algorithm detected: $HASH_METHOD."
+
+    else
+
+        case "${HASH_METHOD,,}" in
+
+            md5|des)
+                check CRITICAL "Weak password hashing algorithm detected: $HASH_METHOD."
+                ;;
+
+            sha256)
+                check WARNING "SHA-256 password hashing detected. A stronger password hashing method should be used when supported."
+                ;;
+
+            *)
+                check WARNING "Password hashing method requires verification: $HASH_METHOD."
+                ;;
+
+        esac
+
+    fi
+
+else
+
+    check WARNING "Unable to determine the configured password hashing algorithm."
 
 fi
 
@@ -401,26 +534,15 @@ if [[ ! "$APPLY" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-echo
-echo "=============================================="
-echo "          KERNEL HARDENING MENU"
-echo "=============================================="
-echo
-echo "1. Apply recommended sysctl protections."
-echo "2. Review current kernel parameters."
-echo "3. Review loaded kernel modules."
-echo "4. Review kernel security status."
-echo "5. Review IP forwarding."
-echo "0. Exit."
-echo
+# ==================================================
+# CONFIGURATION PATH
+# ==================================================
 
-read -rp "Select an option: " OPTION
+CONFIG="/etc/sysctl.d/99-cyberpatriot-hardening.conf"
 
 # ==================================================
 # BACKUP CONFIGURATION
 # ==================================================
-
-CONFIG="/etc/sysctl.d/99-cyberpatriot-hardening.conf"
 
 backup_config() {
 
@@ -440,43 +562,47 @@ backup_config() {
 }
 
 # ==================================================
-# REMEDIATION
+# BACKUP PASSWORD CONFIGURATION
 # ==================================================
 
-case "$OPTION" in
+backup_password_config() {
 
-    1)
+    BACKUP_DIR="$LOG_DIR/password_hash_backups"
+    mkdir -p "$BACKUP_DIR"
 
-        echo
-        echo "The following protections will be configured:"
-        echo
-        echo "- ASLR"
-        echo "- Kernel pointer restrictions"
-        echo "- Kernel message restrictions"
-        echo "- SUID core dump restrictions"
-        echo "- ICMP redirect protections"
-        echo "- Source routing protections"
-        echo "- TCP SYN cookies"
-        echo
-        echo "IP forwarding will NOT be changed."
-        echo "Existing kernel module configurations will NOT be changed."
-        echo
+    BACKUP_DATE="$(date +%Y%m%d_%H%M%S)"
 
-        read -rp "Apply these settings? (y/n): " CONFIRM
+    if [[ -f /etc/login.defs ]]; then
 
-        if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-            echo "Cancelled."
-            exit 0
-        fi
+        cp -a /etc/login.defs \
+            "$BACKUP_DIR/login.defs.$BACKUP_DATE"
 
-        if ! backup_config; then
-            echo "ERROR: Could not back up existing configuration."
-            exit 1
-        fi
+    fi
 
-        TEMP_CONFIG="$(mktemp)"
+    if [[ -f /etc/pam.d/common-password ]]; then
 
-        cat > "$TEMP_CONFIG" <<'EOF'
+        cp -a /etc/pam.d/common-password \
+            "$BACKUP_DIR/common-password.$BACKUP_DATE"
+
+    fi
+
+    return 0
+}
+
+# ==================================================
+# APPLY SYSCTL HARDENING
+# ==================================================
+
+apply_sysctl_hardening() {
+
+    if ! backup_config; then
+        echo "ERROR: Could not back up existing sysctl configuration."
+        return 1
+    fi
+
+    TEMP_CONFIG="$(mktemp)"
+
+    cat > "$TEMP_CONFIG" <<'EOF'
 # CyberPatriot Kernel Security Hardening
 # Generated by Kernel_Security.sh
 
@@ -507,114 +633,94 @@ net.ipv4.tcp_syncookies = 1
 # IPv6 redirect protection
 net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
+
+# Log IPv4 martian/impossible addresses
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
 EOF
 
-        chmod 644 "$TEMP_CONFIG"
+    chmod 644 "$TEMP_CONFIG"
 
-        if ! mv "$TEMP_CONFIG" "$CONFIG"; then
-            echo "ERROR: Could not install configuration."
-            exit 1
-        fi
+    if ! mv "$TEMP_CONFIG" "$CONFIG"; then
+        echo "ERROR: Could not install sysctl configuration."
+        rm -f "$TEMP_CONFIG"
+        return 1
+    fi
 
-        if sysctl --load="$CONFIG"; then
-
-            check PASS "Kernel security settings applied."
-
-        else
-
-            echo "ERROR: Some settings could not be applied."
-            echo "Check the log and inspect the configuration."
-
-            check WARNING "Kernel settings require additional review."
-        fi
-        ;;
-
-    2)
-
-        echo
-        sysctl -a 2>/dev/null |
-            grep -E 'randomize_va_space|kptr_restrict|dmesg_restrict|suid_dumpable|accept_redirects|accept_source_route|tcp_syncookies'
-
-        ;;
-
-    3)
-
-        if command -v lsmod >/dev/null 2>&1; then
-            lsmod
-        else
-            echo "lsmod unavailable."
-        fi
-
-        ;;
-
-    4)
-
-        echo
-        echo "Kernel: $(uname -r)"
-        echo "Architecture: $(uname -m)"
-
-        if [[ -r /sys/kernel/security/lockdown ]]; then
-            cat /sys/kernel/security/lockdown
-        fi
-
-        if [[ -r /sys/module/module/parameters/sig_enforce ]]; then
-            echo "Module signature enforcement:"
-            cat /sys/module/module/parameters/sig_enforce
-        fi
-
-        ;;
-
-    5)
-
-        echo "IPv4 forwarding:"
-        sysctl net.ipv4.ip_forward 2>/dev/null || true
-
-        echo
-        echo "IPv6 forwarding:"
-        sysctl net.ipv6.conf.all.forwarding 2>/dev/null || true
-
-        echo
-        echo "WARNING: Do not disable forwarding on systems acting as routers."
-        ;;
-
-    0)
-        exit 0
-        ;;
-
-    *)
-
-        echo "Invalid selection."
-        exit 1
-        ;;
-
-esac
+    if sysctl --load="$CONFIG"; then
+        check PASS "Kernel security settings applied."
+        return 0
+    else
+        echo "ERROR: Some sysctl settings could not be applied."
+        check WARNING "Kernel settings require additional review."
+        return 1
+    fi
+}
 
 # ==================================================
-# FINAL VERIFICATION
+# PASSWORD HASHING HARDENING
 # ==================================================
 
-echo
-echo "=============================================="
-echo "       FINAL KERNEL VERIFICATION"
-echo "=============================================="
+apply_password_hashing_hardening() {
 
-for KEY in \
-    kernel.randomize_va_space \
-    kernel.kptr_restrict \
-    kernel.dmesg_restrict \
-    fs.suid_dumpable \
-    net.ipv4.tcp_syncookies
-do
+    echo
+    echo "=============================================="
+    echo "       PASSWORD HASHING HARDENING"
+    echo "=============================================="
 
-    echo "$KEY: $(sysctl -n "$KEY" 2>/dev/null || echo unavailable)"
+    echo
+    echo "The script will check whether yescrypt is supported."
+    echo "If yescrypt is supported, it will be configured."
+    echo "Otherwise, SHA-512 will be used where appropriate."
+    echo
+    echo "A backup of the relevant authentication configuration"
+    echo "will be created before changes are attempted."
+    echo
 
-done
+    read -rp "Apply secure password hashing configuration? (y/n): " HASH_CONFIRM
 
-echo
-echo "Kernel security session completed."
-echo "Configuration: $CONFIG"
-echo "Log: $LOG"
+    if [[ ! "$HASH_CONFIRM" =~ ^[Yy]$ ]]; then
+        echo "Password hashing changes cancelled."
+        return 0
+    fi
 
-log "Kernel security session completed."
+    backup_password_config
 
-exit 0
+    # --------------------------------------------------
+    # Debian / Ubuntu / Mint / Pop!_OS
+    # --------------------------------------------------
+
+    if [[ -f /etc/pam.d/common-password ]]; then
+
+        echo
+        echo "Debian-family PAM configuration detected."
+
+        if grep -qE '^[[:space:]]*password.*pam_unix\.so' \
+            /etc/pam.d/common-password 2>/dev/null; then
+
+            PAM_LINE="$(grep -E \
+                '^[[:space:]]*password.*pam_unix\.so' \
+                /etc/pam.d/common-password |
+                head -n 1)"
+
+            echo
+            echo "Current pam_unix configuration:"
+            echo "$PAM_LINE"
+
+            if grep -q "yescrypt" /etc/pam.d/common-password 2>/dev/null; then
+
+                check PASS "yescrypt is already configured in PAM."
+
+            elif grep -q "sha512" /etc/pam.d/common-password 2>/dev/null; then
+
+                check PASS "SHA-512 is already configured in PAM."
+
+            else
+
+                if grep -q "yescrypt" /etc/pam.d/common-password 2>/dev/null; then
+                    check PASS "yescrypt configuration detected."
+                else
+                    echo
+                    echo "No explicit yescrypt setting was detected."
+                    echo
+                    echo "Your
