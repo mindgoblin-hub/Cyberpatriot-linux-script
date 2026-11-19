@@ -1,4 +1,3 @@
-
 #!/bin/bash
 
 # ==========================================
@@ -179,6 +178,41 @@ fi
 log "Firewall backup created: $BACKUP"
 
 # ==========================================
+# PORT INPUT VALIDATION
+# ==========================================
+
+validate_ports() {
+
+    local INPUT="$1"
+    local OUTPUT=""
+
+    # Convert commas to spaces
+    INPUT="${INPUT//,/ }"
+
+    for PORT in $INPUT; do
+
+        if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+            echo "Invalid port: $PORT"
+            return 1
+        fi
+
+        if (( PORT < 1 || PORT > 65535 )); then
+            echo "Port out of range: $PORT"
+            return 1
+        fi
+
+        if [[ -z "$OUTPUT" ]]; then
+            OUTPUT="$PORT"
+        else
+            OUTPUT="$OUTPUT,$PORT"
+        fi
+
+    done
+
+    echo "$OUTPUT"
+}
+
+# ==========================================
 # UFW CONFIGURATION
 # ==========================================
 
@@ -195,7 +229,7 @@ configure_ufw() {
 
     echo
     echo "Existing firewall rules will be preserved."
-    echo "Review existing ALLOW rules carefully."
+    echo
 
     read -rp "Continue? (yes/no): " CONTINUE
 
@@ -204,7 +238,75 @@ configure_ufw() {
         return
     fi
 
+    # ======================================
+    # TCP PORTS
+    # ======================================
+
+    echo
+    echo "=========================================="
+    echo "              TCP PORTS"
+    echo "=========================================="
+
+    echo "Enter TCP ports that should be allowed."
+    echo "Examples:"
+    echo "  22"
+    echo "  22 80 443"
+    echo "  22,80,443"
+    echo
+    echo "Leave blank if no TCP ports should be allowed."
+
+    read -rp "TCP ports: " TCP_INPUT
+
+    if [[ -n "$TCP_INPUT" ]]; then
+
+        TCP_PORTS=$(validate_ports "$TCP_INPUT")
+
+        if [[ $? -ne 0 ]]; then
+            echo "Invalid TCP port list."
+            log "Invalid TCP port input."
+            return
+        fi
+
+    else
+        TCP_PORTS=""
+    fi
+
+    # ======================================
+    # UDP PORTS
+    # ======================================
+
+    echo
+    echo "=========================================="
+    echo "              UDP PORTS"
+    echo "=========================================="
+
+    echo "Enter UDP ports that should be allowed."
+    echo "Examples:"
+    echo "  53"
+    echo "  53 67 68"
+    echo "  53,67,68"
+    echo
+    echo "Leave blank if no UDP ports should be allowed."
+
+    read -rp "UDP ports: " UDP_INPUT
+
+    if [[ -n "$UDP_INPUT" ]]; then
+
+        UDP_PORTS=$(validate_ports "$UDP_INPUT")
+
+        if [[ $? -ne 0 ]]; then
+            echo "Invalid UDP port list."
+            log "Invalid UDP port input."
+            return
+        fi
+
+    else
+        UDP_PORTS=""
+    fi
+
+    # ======================================
     # SSH DETECTION
+    # ======================================
 
     SSH_PORT=""
 
@@ -214,83 +316,151 @@ configure_ufw() {
 
         echo
         echo "SSH connection detected."
-        echo "Server port: $SSH_PORT"
+        echo "Current SSH server port: $SSH_PORT"
 
-        read -rp "Allow and rate-limit this SSH port? (yes/no): " SSH_ALLOW
+        if [[ "$TCP_PORTS" != *"$SSH_PORT"* ]]; then
+            echo
+            echo "WARNING: Your current SSH port is not in the TCP"
+            echo "allow list."
+            echo
+            read -rp "Automatically add SSH port $SSH_PORT to TCP? (yes/no): " SSH_ADD
 
-    elif command -v ss >/dev/null 2>&1 &&
-         ss -lntp 2>/dev/null | grep -q sshd; then
+            if [[ "$SSH_ADD" == "yes" ]]; then
 
-        echo
-        echo "SSH service appears to be listening."
+                if [[ -z "$TCP_PORTS" ]]; then
+                    TCP_PORTS="$SSH_PORT"
+                else
+                    TCP_PORTS="$TCP_PORTS,$SSH_PORT"
+                fi
 
-        read -rp "Allow and rate-limit SSH on port 22? (yes/no): " SSH_ALLOW
+            else
+                echo
+                echo "WARNING: Continuing without allowing SSH may"
+                echo "disconnect your current session."
+                read -rp "Continue anyway? (yes/no): " SSH_CONTINUE
 
-        [[ "$SSH_ALLOW" == "yes" ]] && SSH_PORT=22
-
-    else
-
-        SSH_ALLOW="no"
-        echo "No SSH listener detected."
-
-    fi
-
-    if [[ "$SSH_ALLOW" == "yes" ]]; then
-
-        if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] ||
-           (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
-
-            echo "Invalid SSH port."
-            return
-
+                if [[ "$SSH_CONTINUE" != "yes" ]]; then
+                    log "UFW configuration cancelled to protect SSH access."
+                    return
+                fi
+            fi
         fi
 
     fi
 
+    # ======================================
+    # SHOW PROPOSED POLICY
+    # ======================================
+
     echo
     echo "=========================================="
-    echo "          PROPOSED UFW POLICY"
+    echo "         PROPOSED UFW POLICY"
     echo "=========================================="
 
+    echo
+    echo "TCP:"
+    echo "  Allowed: ${TCP_PORTS:-NONE}"
+    echo "  Everything else: DENY"
+
+    echo
+    echo "UDP:"
+    echo "  Allowed: ${UDP_PORTS:-NONE}"
+    echo "  Everything else: DENY"
+
+    echo
     echo "Incoming: DENY"
     echo "Outgoing: ALLOW"
     echo "Routed:   DENY"
     echo "Logging:  ON"
 
-    if [[ "$SSH_ALLOW" == "yes" ]]; then
-        echo "SSH: Rate limited on port $SSH_PORT"
-    else
-        echo "SSH: No new allow rule"
-    fi
-
     echo
-    echo "WARNING: Existing allow rules remain."
-    echo "This may affect network services."
+    echo "Existing UFW rules are preserved."
+    echo
+    echo "WARNING: Incorrect port selections may interrupt"
+    echo "network services or remote administration."
 
-    read -rp "Apply firewall defaults? (yes/no): " CONFIRM
+    read -rp "Apply this firewall policy? (yes/no): " CONFIRM
 
     if [[ "$CONFIRM" != "yes" ]]; then
         log "UFW changes declined."
         return
     fi
 
+    # ======================================
+    # DEFAULT DENY POLICY
+    # ======================================
+
     FAILED=0
+
+    echo
+    echo "Configuring firewall defaults..."
 
     ufw default deny incoming || FAILED=1
     ufw default allow outgoing || FAILED=1
     ufw default deny routed || FAILED=1
 
-    if [[ "$SSH_ALLOW" == "yes" ]]; then
-        ufw limit "$SSH_PORT/tcp" || FAILED=1
+    # ======================================
+    # TCP RULES
+    # ======================================
+
+    echo
+    echo "Configuring TCP rules..."
+
+    if [[ -n "$TCP_PORTS" ]]; then
+
+        IFS=',' read -ra TCP_ARRAY <<< "$TCP_PORTS"
+
+        for PORT in "${TCP_ARRAY[@]}"; do
+            echo "Allowing TCP port $PORT..."
+            ufw allow "$PORT/tcp" || FAILED=1
+        done
+
+    else
+        echo "No TCP ports will be allowed."
     fi
+
+    # ======================================
+    # UDP RULES
+    # ======================================
+
+    echo
+    echo "Configuring UDP rules..."
+
+    if [[ -n "$UDP_PORTS" ]]; then
+
+        IFS=',' read -ra UDP_ARRAY <<< "$UDP_PORTS"
+
+        for PORT in "${UDP_ARRAY[@]}"; do
+            echo "Allowing UDP port $PORT..."
+            ufw allow "$PORT/udp" || FAILED=1
+        done
+
+    else
+        echo "No UDP ports will be allowed."
+    fi
+
+    # ======================================
+    # LOGGING
+    # ======================================
+
+    echo
+    echo "Enabling firewall logging..."
 
     ufw logging on || FAILED=1
 
     if [[ "$FAILED" -ne 0 ]]; then
+
+        echo
         echo "Firewall configuration encountered errors."
         log "UFW configuration failed."
+
         return
+
     fi
+
+    # ======================================
+    # ENABLE FIREWALL
+    # ======================================
 
     echo
     read -rp "Enable UFW now? (yes/no): " ENABLE
@@ -298,22 +468,33 @@ configure_ufw() {
     if [[ "$ENABLE" == "yes" ]]; then
 
         if ufw --force enable; then
+
+            echo
             echo "UFW enabled successfully."
             log "UFW enabled."
+
         else
+
+            echo
             echo "UFW activation failed."
             log "UFW activation failed."
             return
+
         fi
 
     else
 
+        echo
         echo "UFW rules configured but not enabled."
         log "UFW activation deferred."
 
     fi
 
     echo
+    echo "=========================================="
+    echo "            FINAL UFW RULES"
+    echo "=========================================="
+
     ufw status verbose
 }
 
@@ -334,14 +515,15 @@ configure_firewalld() {
     echo "Default zone:"
     firewall-cmd --get-default-zone
 
+    DEFAULT_ZONE=$(firewall-cmd --get-default-zone)
+
     echo
     echo "Active zones:"
     firewall-cmd --get-active-zones
 
     echo
     echo "Current firewall configuration:"
-
-    firewall-cmd --list-all
+    firewall-cmd --zone="$DEFAULT_ZONE" --list-all
 
     echo
     echo "Existing zones, services and rules will be preserved."
@@ -354,82 +536,214 @@ configure_firewalld() {
         return
     fi
 
-    # SSH PROTECTION
-
-    echo
-    echo "Does this machine need incoming SSH access?"
-    read -rp "Allow the standard SSH service (port 22)? (yes/no): " SSH_ALLOW
-
-    if [[ "$SSH_ALLOW" == "yes" ]]; then
-
-        echo
-        echo "SSH will be added to the current default zone."
-        echo "This uses the standard SSH service definition."
-
-        read -rp "Confirm SSH access? (yes/no): " SSH_CONFIRM
-
-    else
-
-        SSH_CONFIRM="no"
-
-    fi
+    # ======================================
+    # TCP PORTS
+    # ======================================
 
     echo
     echo "=========================================="
-    echo "       PROPOSED FIREWALL POLICY"
+    echo "              TCP PORTS"
     echo "=========================================="
 
-    echo "Existing firewalld zone: preserved"
-    echo "Existing allowed services: preserved"
-    echo "Unsolicited incoming traffic: default zone policy"
-    echo "Outgoing traffic: unchanged"
-    echo "Existing forwarding policies: unchanged"
+    echo "Enter TCP ports that should be allowed."
+    echo "Examples:"
+    echo "  22"
+    echo "  22 80 443"
+    echo "  22,80,443"
+    echo
+    echo "Leave blank if no TCP ports should be allowed."
 
-    if [[ "$SSH_CONFIRM" == "yes" ]]; then
-        echo "SSH service: Allow port 22"
+    read -rp "TCP ports: " TCP_INPUT
+
+    if [[ -n "$TCP_INPUT" ]]; then
+
+        TCP_PORTS=$(validate_ports "$TCP_INPUT")
+
+        if [[ $? -ne 0 ]]; then
+            echo "Invalid TCP port list."
+            log "Invalid TCP port input."
+            return
+        fi
+
     else
-        echo "SSH service: No new SSH rule"
+        TCP_PORTS=""
     fi
 
-    echo
-    echo "WARNING: Firewall activation may interrupt"
-    echo "incoming network services."
+    # ======================================
+    # UDP PORTS
+    # ======================================
 
-    read -rp "Apply this configuration? (yes/no): " CONFIRM
+    echo
+    echo "=========================================="
+    echo "              UDP PORTS"
+    echo "=========================================="
+
+    echo "Enter UDP ports that should be allowed."
+    echo "Examples:"
+    echo "  53"
+    echo "  53 67 68"
+    echo "  53,67,68"
+    echo
+    echo "Leave blank if no UDP ports should be allowed."
+
+    read -rp "UDP ports: " UDP_INPUT
+
+    if [[ -n "$UDP_INPUT" ]]; then
+
+        UDP_PORTS=$(validate_ports "$UDP_INPUT")
+
+        if [[ $? -ne 0 ]]; then
+            echo "Invalid UDP port list."
+            log "Invalid UDP port input."
+            return
+        fi
+
+    else
+        UDP_PORTS=""
+    fi
+
+    # ======================================
+    # SHOW PROPOSED POLICY
+    # ======================================
+
+    echo
+    echo "=========================================="
+    echo "      PROPOSED FIREWALLD POLICY"
+    echo "=========================================="
+
+    echo
+    echo "Zone: $DEFAULT_ZONE"
+
+    echo
+    echo "TCP:"
+    echo "  Allowed: ${TCP_PORTS:-NONE}"
+    echo "  Everything else: DENY"
+
+    echo
+    echo "UDP:"
+    echo "  Allowed: ${UDP_PORTS:-NONE}"
+    echo "  Everything else: DENY"
+
+    echo
+    echo "Existing firewalld configuration: PRESERVED"
+
+    echo
+    echo "WARNING: Incorrect port selections may interrupt"
+    echo "network services or remote administration."
+
+    read -rp "Apply this firewall policy? (yes/no): " CONFIRM
 
     if [[ "$CONFIRM" != "yes" ]]; then
         log "Firewalld changes declined."
         return
     fi
 
+    # ======================================
+    # START FIREWALLD
+    # ======================================
+
     if ! systemctl enable --now firewalld; then
+
         echo "Could not start firewalld."
         log "Firewalld activation failed."
         return
-    fi
-
-    if [[ "$SSH_CONFIRM" == "yes" ]]; then
-
-        if ! firewall-cmd --add-service=ssh --permanent; then
-            echo "Could not add SSH service."
-            log "SSH service configuration failed."
-            return
-        fi
 
     fi
+
+    # ======================================
+    # TCP RULES
+    # ======================================
+
+    echo
+    echo "Configuring TCP rules..."
+
+    if [[ -n "$TCP_PORTS" ]]; then
+
+        IFS=',' read -ra TCP_ARRAY <<< "$TCP_PORTS"
+
+        for PORT in "${TCP_ARRAY[@]}"; do
+
+            echo "Allowing TCP port $PORT..."
+
+            if ! firewall-cmd \
+                --zone="$DEFAULT_ZONE" \
+                --add-port="$PORT/tcp" \
+                --permanent; then
+
+                echo "Failed to allow TCP port $PORT."
+                log "Failed to allow TCP port $PORT."
+                return
+
+            fi
+
+        done
+
+    else
+
+        echo "No TCP ports will be allowed."
+
+    fi
+
+    # ======================================
+    # UDP RULES
+    # ======================================
+
+    echo
+    echo "Configuring UDP rules..."
+
+    if [[ -n "$UDP_PORTS" ]]; then
+
+        IFS=',' read -ra UDP_ARRAY <<< "$UDP_PORTS"
+
+        for PORT in "${UDP_ARRAY[@]}"; do
+
+            echo "Allowing UDP port $PORT..."
+
+            if ! firewall-cmd \
+                --zone="$DEFAULT_ZONE" \
+                --add-port="$PORT/udp" \
+                --permanent; then
+
+                echo "Failed to allow UDP port $PORT."
+                log "Failed to allow UDP port $PORT."
+                return
+
+            fi
+
+        done
+
+    else
+
+        echo "No UDP ports will be allowed."
+
+    fi
+
+    # ======================================
+    # RELOAD
+    # ======================================
+
+    echo
+    echo "Reloading firewalld..."
 
     if ! firewall-cmd --reload; then
+
         echo "Firewall reload failed."
         log "Firewalld reload failed."
         return
+
     fi
 
     echo
-    echo "Firewalld is running."
-
-    firewall-cmd --list-all
+    echo "Firewalld configuration completed."
 
     log "Firewalld configuration completed."
+
+    echo
+    echo "=========================================="
+    echo "          FINAL FIREWALL RULES"
+    echo "=========================================="
+
+    firewall-cmd --zone="$DEFAULT_ZONE" --list-all
 }
 
 # ==========================================
